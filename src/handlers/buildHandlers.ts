@@ -109,9 +109,9 @@ export async function handleAnalyzeBuild(context: HandlerContext, buildName: str
     ...(luaActiveItemSetId !== null && build.Items
       ? { Items: { ...(build.Items as any), activeItemSet: luaActiveItemSetId } }
       : {}),
-    ...(luaActiveItemSetId !== null && build.Skills
-      ? { Skills: { ...(build.Skills as any), activeSkillSet: luaActiveItemSetId } }
-      : {}),
+    // Skill set ids are numbered independently of item set ids, so the item
+    // set's id says nothing about which skill set is active. The bridge does not
+    // report the active skill set, so leave the file's own value alone.
   };
 
   const summaryParts: string[] = [context.buildService.generateBuildSummary(buildForAnalysis)];

@@ -4,6 +4,7 @@ import path from "path";
 import type { PoBBuild, CachedBuild, ParsedConfiguration, ConfigInput, ConfigSet, Flask, FlaskAnalysis, Jewel, JewelAnalysis } from "../types.js";
 import { sanitizeBuildName } from "../utils/pathSanitizer.js";
 import { parseItem, itemLabel } from "./itemParser.js";
+import { parseSkills, gemLabel, socketGroupLabel } from "./skillParser.js";
 import { TIMELESS_SEED_PHRASES } from "../data/itemFormat.generated.js";
 
 const CACHE_TTL_MS = 60_000;  // 60 seconds
@@ -103,23 +104,32 @@ export class BuildService {
       }
     }
 
-    // Skills — handle single SkillSet or array of SkillSets
+    // Skills - the active set only, with the slot and main-skill markers that
+    // make one socket group distinguishable from another.
     {
-      const skillSetRaw = build.Skills?.SkillSet;
-      const skillSets: any[] = skillSetRaw
-        ? (Array.isArray(skillSetRaw) ? skillSetRaw : [skillSetRaw])
-        : [];
-      const activeSkillSetId = String((build.Skills as any)?.activeSkillSet ?? '1');
-      const activeSkillSet = skillSets.find((ss: any) => String(ss.id) === activeSkillSetId) ?? skillSets[0];
-      if (activeSkillSet?.Skill) {
-        const setLabel = skillSets.length > 1 ? ` (Set ${activeSkillSetId} of ${skillSets.length})` : '';
+      const skills = parseSkills(build);
+      const set = skills.activeSet;
+      if (set) {
+        const setLabel =
+          skills.sets.length > 1
+            ? ` - "${set.title}" (id ${set.id}, position ${set.index} of ${skills.sets.length})`
+            : '';
         summary += `=== Skills${setLabel} ===\n`;
-        const skills = Array.isArray(activeSkillSet.Skill) ? activeSkillSet.Skill : [activeSkillSet.Skill];
-        for (const skill of skills) {
-          if (skill.Gem) {
-            const gems = Array.isArray(skill.Gem) ? skill.Gem : [skill.Gem];
-            summary += gems.map((g: any) => `${g.nameSpec || g.name || 'Unknown'} (${g.level}/${g.quality})`).join(" - ");
-            summary += "\n";
+        if (skills.activeSetResolvedBy === 'fallback') {
+          summary += `  note: activeSkillSet "${skills.activeSkillSetId}" matches no set; showing the first.\n`;
+        }
+        for (const group of set.groups) {
+          // Label-only groups are section headers authors use to organise the
+          // list. Showing them keeps the structure readable; calling them links
+          // would be wrong.
+          if (group.isLabelOnly) {
+            if (group.label) summary += `  -- ${group.label} --\n`;
+            continue;
+          }
+          const isMain = skills.mainSocketGroup?.index === group.index;
+          summary += `${group.index}. ${socketGroupLabel(group)}${isMain ? '  <- main skill' : ''}\n`;
+          for (const gem of group.gems) {
+            summary += `     ${gem.isSupport ? '-' : 'S'} ${gemLabel(gem)}\n`;
           }
         }
         summary += "\n";

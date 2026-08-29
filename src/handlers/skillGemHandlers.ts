@@ -31,12 +31,30 @@ export async function handleAnalyzeSkillLinks(
   const analysis = skillGemService.analyzeSkillLinks(buildData, skillIndex);
 
   // Format output
+  const c = analysis.context;
+  const chosen =
+    c.chosenBy === "main-socket-group"
+      ? "the build's main socket group"
+      : c.chosenBy === "explicit"
+        ? "requested explicitly"
+        : "first group with gems — mainSocketGroup points at a label-only header";
+
   const outputLines: string[] = [
     `=== Skill Analysis: ${analysis.activeSkill.name} ===`,
     '',
+    // Which set and group this describes. A build with several skill sets is
+    // otherwise indistinguishable from one, and the saved-active set is often a
+    // levelling setup rather than the endgame one.
+    `Skill Set: "${c.skillSetTitle}" (id ${c.skillSetId}, position ${c.skillSetPosition})`,
+    `Socket Group ${c.groupIndex}${c.groupSlot ? ` [${c.groupSlot}]` : ''}${c.groupLabel ? ` "${c.groupLabel}"` : ''} — ${chosen}`,
+    '',
     `Active Skill: ${analysis.activeSkill.name} (Level ${analysis.activeSkill.level}/${analysis.activeSkill.quality})`,
-    `Tags: ${analysis.activeSkill.tags.join(", ")}`,
-    `Archetype: ${analysis.archetype}`,
+    // The bundled gem database covers supports and a handful of minion skills,
+    // so most active skills have no tags. Saying nothing beats printing an
+    // empty list and an archetype that was never really determined.
+    ...(analysis.activeSkill.tags.length > 0
+      ? [`Tags: ${analysis.activeSkill.tags.join(", ")}`, `Archetype: ${analysis.archetype}`]
+      : [`Archetype: not determined (${analysis.activeSkill.name} is not in the bundled gem database)`]),
     '',
     `=== Support Gems (${analysis.linkCount}-Link) ===`,
   ];
@@ -45,9 +63,9 @@ export async function handleAnalyzeSkillLinks(
     const support = analysis.supports[i];
     const symbol = support.rating === "excellent" ? "✓" : support.rating === "poor" ? "✗" : "⚠";
 
-    outputLines.push(`${i + 1}. ${symbol} ${support.name} (${support.level}/${support.quality}) - ${
-      support.rating.charAt(0).toUpperCase() + support.rating.slice(1)
-    }`);
+    outputLines.push(`${i + 1}. ${symbol} ${support.name} (${support.level}/${support.quality})${
+      support.enabled === false ? " [disabled]" : ""
+    } - ${support.rating.charAt(0).toUpperCase() + support.rating.slice(1)}`);
 
     if (support.issues && support.issues.length > 0) {
       for (const issue of support.issues) {
@@ -69,13 +87,21 @@ export async function handleAnalyzeSkillLinks(
     }
   }
 
-  outputLines.push(`\n=== Archetype Match: ${Math.round(analysis.archetypeMatch)}% ===`);
-  if (analysis.archetypeMatch >= 80) {
-    outputLines.push(`Strong alignment with "${analysis.archetype}" archetype`);
-  } else if (analysis.archetypeMatch >= 60) {
-    outputLines.push(`Moderate alignment with "${analysis.archetype}" archetype`);
+  // Only worth reporting a match when there was an archetype to match against.
+  if (analysis.activeSkill.tags.length === 0) {
+    outputLines.push(
+      `\nArchetype scoring skipped: no tags are known for ${analysis.activeSkill.name}, so the ratings above ` +
+        `compare the support gems against a generic profile rather than this skill.`
+    );
   } else {
-    outputLines.push(`Weak alignment with "${analysis.archetype}" archetype - consider reviewing gem choices`);
+    outputLines.push(`\n=== Archetype Match: ${Math.round(analysis.archetypeMatch)}% ===`);
+    if (analysis.archetypeMatch >= 80) {
+      outputLines.push(`Strong alignment with "${analysis.archetype}" archetype`);
+    } else if (analysis.archetypeMatch >= 60) {
+      outputLines.push(`Moderate alignment with "${analysis.archetype}" archetype`);
+    } else {
+      outputLines.push(`Weak alignment with "${analysis.archetype}" archetype - consider reviewing gem choices`);
+    }
   }
 
   outputLines.push('', '💡 Use suggest_support_gems to see recommended improvements');

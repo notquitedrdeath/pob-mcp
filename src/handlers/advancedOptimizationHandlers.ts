@@ -1,3 +1,4 @@
+import { parseSkills } from "../services/skillParser.js";
 import type { PoBLuaApiClient } from "../pobLuaBridge.js";
 import type { BuildService } from "../services/buildService.js";
 import {
@@ -234,26 +235,29 @@ export async function handleOptimizeSkillLinks(
         build.Build?.ascendClassName
       );
 
-      // Extract skills from XML
-      if (build.Skills?.SkillSet?.Skill) {
-        const skills = Array.isArray(build.Skills.SkillSet.Skill)
-          ? build.Skills.SkillSet.Skill
-          : [build.Skills.SkillSet.Skill];
+      // Extract skills from XML. Skills.SkillSet is an array whenever a build
+      // has more than one set, so `.Skill` on it is undefined and this found
+      // nothing at all; and only the active set is worth optimising.
+      {
+        const parsed = parseSkills(build);
+        const skills = (parsed.activeSet?.groups ?? []).filter((g) => !g.isLabelOnly);
 
         skillGroups = skills.map((skill: any, idx) => {
-          const gems = Array.isArray(skill.Gem) ? skill.Gem : skill.Gem ? [skill.Gem] : [];
+          const gems = skill.gems;
 
           return {
-            index: idx + 1,
+            index: skill.index,
             label: skill.label,
             slot: skill.slot,
-            enabled: skill.enabled !== 'false',
-            isMainSkill: idx === 0, // Assume first is main
+            // These are booleans now, not the raw "true"/"false" strings; the
+            // old `!== 'false'` test was true for every group and every gem.
+            enabled: skill.enabled,
+            isMainSkill: skill.index === parsed.mainSocketGroup?.index,
             gems: gems.map((gem: any) => ({
-              name: gem.name || 'Unknown',
-              level: parseInt(gem.level || '1', 10),
-              quality: parseInt(gem.quality || '0', 10),
-              enabled: gem.enabled !== 'false',
+              name: gem.name,
+              level: gem.level,
+              quality: gem.quality,
+              enabled: gem.enabled,
             })),
           };
         });
@@ -314,16 +318,12 @@ export async function handleCreateBudgetBuild(
     const class_name = build.Build?.className || 'Unknown';
     const ascendancy = build.Build?.ascendClassName;
 
-    // Get main skill from first skill group
+    // The build's main skill, not whichever group happens to sort first.
     let main_skill = 'your main skill';
-    if (build.Skills?.SkillSet?.Skill) {
-      const skills = Array.isArray(build.Skills.SkillSet.Skill)
-        ? build.Skills.SkillSet.Skill
-        : [build.Skills.SkillSet.Skill];
-      const firstSkill = skills[0];
-      if (firstSkill?.Gem) {
-        const gems = Array.isArray(firstSkill.Gem) ? firstSkill.Gem : [firstSkill.Gem];
-        const activeGem = gems.find((g: any) => g.enabled !== 'false' && !g.name?.includes('Support'));
+    {
+      const parsed = parseSkills(build);
+      if (parsed.mainSkill) {
+        const activeGem: any = parsed.mainSkill;
         if (activeGem?.name) main_skill = activeGem.name;
       }
     }

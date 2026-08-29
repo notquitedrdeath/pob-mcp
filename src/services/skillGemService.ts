@@ -1,4 +1,5 @@
 import type { PoBBuild } from "../types.js";
+import { parseSkills, baseGemName, type ParsedSocketGroup } from "./skillParser.js";
 
 export interface GemData {
   name: string;
@@ -43,6 +44,8 @@ export interface GemAnalysis {
     level: number;
     quality: number;
     rating: "excellent" | "good" | "suboptimal" | "poor";
+    /** A disabled gem sits in the group without contributing. */
+    enabled?: boolean;
     issues?: string[];
     recommendations?: string[];
   }[];
@@ -51,6 +54,17 @@ export interface GemAnalysis {
   issues: string[];
   linkCount: number;
   maxLinks: number;
+  /** Which set and group this describes, and how they were picked. */
+  context: {
+    skillSetTitle: string;
+    skillSetId: string;
+    /** Position of that set in document order — ids are not positions. */
+    skillSetPosition: number;
+    groupIndex: number;
+    groupSlot?: string;
+    groupLabel?: string;
+    chosenBy: "main-socket-group" | "explicit" | "fallback";
+  };
 }
 
 export interface GemSuggestion {
@@ -82,14 +96,19 @@ export class SkillGemService {
     build: PoBBuild,
     skillIndex: number = 0
   ): GemAnalysis {
-    const skills = this.extractSkills(build);
-    if (skillIndex >= skills.length) {
-      throw new Error(`Skill index ${skillIndex} not found. Build has ${skills.length} skills.`);
+    const parsed = parseSkills(build);
+    const skill = this.resolveGroup(build, skillIndex);
+    // The active skill is the group's mainActiveSkill, not its first gem: a
+    // group can lead with a support, as an Enlighten in an aura link does.
+    const activeGem =
+      skill.group.activeSkills[skill.group.mainActiveSkill - 1] ??
+      skill.group.activeSkills[0];
+    if (!activeGem) {
+      throw new Error(
+        `Socket group ${skill.group.index} has only support gems, so there is no skill to analyse.`
+      );
     }
-
-    const skill = skills[skillIndex];
-    const activeGem = skill.gems[0]; // First gem is usually active skill
-    const supportGems = skill.gems.slice(1);
+    const supportGems = skill.gems.filter((g: any) => g !== activeGem);
 
     // Detect archetype
     const archetype = this.detectArchetype(activeGem, build);
@@ -103,17 +122,28 @@ export class SkillGemService {
 
     return {
       activeSkill: {
-        name: activeGem.nameSpec || activeGem.gemId || "Unknown",
-        level: activeGem.level || 1,
-        quality: activeGem.quality || 0,
-        tags: this.getGemTags(activeGem.nameSpec || activeGem.gemId || ""),
+        name: activeGem.name,
+        level: activeGem.level,
+        quality: activeGem.quality,
+        tags: this.getGemTags(activeGem.name),
       },
       supports,
       archetype: archetype.name,
       archetypeMatch,
       issues,
-      linkCount: skill.gems.length,
+      // Disabled gems sit in the group without contributing, so a 6-link with a
+      // spare gem parked in it is not a 7-link.
+      linkCount: skill.gems.filter((g: any) => g.enabled).length,
       maxLinks: 6, // Could parse from item slots
+      context: {
+        skillSetTitle: parsed.activeSet?.title ?? "Unknown",
+        skillSetId: parsed.activeSkillSetId,
+        skillSetPosition: parsed.activeSet?.index ?? 0,
+        groupIndex: skill.group.index,
+        groupSlot: skill.group.slot,
+        groupLabel: skill.group.label || undefined,
+        chosenBy: skill.chosenBy,
+      },
     };
   }
 
@@ -223,9 +253,9 @@ export class SkillGemService {
     const corruptionTargets: Array<{ gem: string; target: string; risk: string }> = [];
 
     for (const gem of allGems) {
-      const name = gem.nameSpec || gem.gemId || "Unknown";
-      const level = gem.level || 1;
-      const quality = gem.quality || 0;
+      const name = gem.name;
+      const level = gem.level;
+      const quality = gem.quality;
 
       // Check quality
       if (quality < 20) {
@@ -267,41 +297,60 @@ export class SkillGemService {
   }
 
   /**
-   * Extract skills from build
+   * The linkable socket groups of the build's *active* skill set.
+   *
+   * This used to flatten every skill set into one list, so index 0 landed on
+   * whichever levelling setup sorted first — a level 95 character reported a
+   * two-link Smite. `activeSkillSet` is an id rather than a position, and
+   * label-only groups are section headers with no gems to analyse.
    */
-  private extractSkills(build: PoBBuild): Array<{ gems: any[]; slot: string }> {
-    const skills: Array<{ gems: any[]; slot: string }> = [];
+  private extractSkills(
+    build: PoBBuild
+  ): Array<{ gems: any[]; slot: string; group: ParsedSocketGroup }> {
+    const parsed = parseSkills(build);
+    return (parsed.activeSet?.groups ?? [])
+      .filter((g) => !g.isLabelOnly)
+      .map((g) => ({
+        gems: g.gems,
+        slot: g.slot ?? "Unknown",
+        group: g,
+      }));
+  }
 
-    if (build.Skills?.SkillSet) {
-      const skillSets = Array.isArray(build.Skills.SkillSet)
-        ? build.Skills.SkillSet
-        : [build.Skills.SkillSet];
-
-      for (const skillSet of skillSets) {
-        if (skillSet.Skill) {
-          const skillArray = Array.isArray(skillSet.Skill) ? skillSet.Skill : [skillSet.Skill];
-
-          for (const skill of skillArray) {
-            if (skill.Gem) {
-              const gems = Array.isArray(skill.Gem) ? skill.Gem : [skill.Gem];
-              skills.push({
-                gems,
-                slot: skill.slot || "Unknown",
-              });
-            }
-          }
-        }
-      }
+  /**
+   * Resolve `skill_index` against the active set.
+   *
+   * 0 (or omitted) means the build's main skill, which is what the tool has
+   * always documented; anything else is a 1-based group number matching the
+   * numbering `get_skill_setup` prints.
+   */
+  private resolveGroup(build: PoBBuild, skillIndex: number) {
+    const groups = this.extractSkills(build);
+    if (groups.length === 0) {
+      throw new Error("This build's active skill set has no socket groups with gems in it.");
     }
-
-    return skills;
+    if (!skillIndex) {
+      const main = parseSkills(build).mainSocketGroup;
+      const found = main && groups.find((g) => g.group.index === main.index);
+      // A build saved on a levelling set can point mainSocketGroup at a section
+      // header, which has no gems. Fall back rather than fail, and report it.
+      return found
+        ? { ...found, chosenBy: "main-socket-group" as const }
+        : { ...groups[0], chosenBy: "fallback" as const };
+    }
+    const byNumber = groups.find((g) => g.group.index === skillIndex);
+    if (byNumber) return { ...byNumber, chosenBy: "explicit" as const };
+    throw new Error(
+      `No socket group ${skillIndex} with gems in the active skill set. ` +
+        `Available: ${groups.map((g) => g.group.index).join(", ")}.`
+    );
   }
 
   /**
    * Detect build archetype
    */
   private detectArchetype(activeGem: any, build: PoBBuild): ArchetypeTemplate {
-    const gemName = activeGem.nameSpec || activeGem.gemId || "";
+    const gemName = activeGem.name;
     const tags = this.getGemTags(gemName);
 
     // Try to match archetype based on tags
@@ -320,7 +369,7 @@ export class SkillGemService {
    * Calculate archetype match percentage
    */
   private calculateArchetypeMatch(supports: any[], archetype: ArchetypeTemplate): number {
-    const supportNames = supports.map((s) => s.nameSpec || s.gemId || "");
+    const supportNames = supports.map((s) => s.name);
     const recommended = archetype.recommended_supports.map((r) => r.gem);
     const avoided = archetype.avoid_supports;
 
@@ -350,12 +399,13 @@ export class SkillGemService {
     level: number;
     quality: number;
     rating: "excellent" | "good" | "suboptimal" | "poor";
+    enabled?: boolean;
     issues?: string[];
     recommendations?: string[];
   } {
-    const name = gem.nameSpec || gem.gemId || "Unknown";
-    const level = gem.level || 1;
-    const quality = gem.quality || 0;
+    const name = gem.name;
+    const level = gem.level;
+    const quality = gem.quality;
 
     const issues: string[] = [];
     const recommendations: string[] = [];
@@ -397,6 +447,7 @@ export class SkillGemService {
       level,
       quality,
       rating,
+      enabled: gem.enabled,
       issues: issues.length > 0 ? issues : undefined,
       recommendations: recommendations.length > 0 ? recommendations : undefined,
     };
@@ -407,7 +458,7 @@ export class SkillGemService {
    */
   private detectIssues(activeGem: any, supports: any[], archetype: ArchetypeTemplate): string[] {
     const issues: string[] = [];
-    const supportNames = supports.map((s) => s.nameSpec || s.gemId || "");
+    const supportNames = supports.map((s) => s.name);
 
     // Check for missing recommended supports
     const missingRecommended = archetype.recommended_supports
@@ -492,7 +543,7 @@ export class SkillGemService {
    * Get gem tags
    */
   private getGemTags(gemName: string): string[] {
-    const gemData = this.gemDatabase.get(gemName);
+    const gemData = this.gemDatabase.get(gemName) ?? this.gemDatabase.get(baseGemName(gemName));
     return gemData?.tags || [];
   }
 
