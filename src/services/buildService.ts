@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import type { PoBBuild, CachedBuild, ParsedConfiguration, ConfigInput, ConfigSet, Flask, FlaskAnalysis, Jewel, JewelAnalysis } from "../types.js";
 import { sanitizeBuildName } from "../utils/pathSanitizer.js";
-import { parseItem, itemLabel } from "./itemParser.js";
+import { parseItem, itemLabel, stripColourCodes } from "./itemParser.js";
 import { parseSkills, gemLabel, socketGroupLabel } from "./skillParser.js";
 import { TIMELESS_SEED_PHRASES } from "../data/itemFormat.generated.js";
 
@@ -163,7 +163,16 @@ export class BuildService {
       const equippedSlots = slots.filter((s: any) => s.itemId && itemMap.has(s.itemId));
       const unrecognised: string[] = [];
       if (equippedSlots.length > 0) {
-        const setLabel = itemSets.length > 1 ? ` (Set ${activeItemSetId} of ${itemSets.length})` : '';
+        // Name the set rather than repeating its id as though it were a
+        // position. On a build with parallel tree/item/skill/config sets these
+        // ids differ from each other and from their positions, so the number
+        // alone says nothing about which loadout this is.
+        const position = itemSets.indexOf(activeItemSet) + 1;
+        const title = stripColourCodes(String(activeItemSet?.title ?? '')) || 'untitled';
+        const setLabel =
+          itemSets.length > 1
+            ? ` - "${title}" (id ${activeItemSetId}, position ${position} of ${itemSets.length})`
+            : '';
         summary += `=== Items${setLabel} ===\n`;
         for (const slot of equippedSlots) {
           const parsed = parseItem(itemMap.get(slot.itemId!)!);
